@@ -29,7 +29,7 @@ backend derives the tenant database from `tenantId`.
 
 ## Running
 
-Needs MySQL 9.7 with a `master_db` database (`docker compose up -d` in `sprintmodus-ng`), and Eureka on 8761.
+Needs MySQL 9.7 with a `master_db` database (`docker compose up -d master-db` in `sprintmodus-infrastructure`), and Eureka on 8761.
 
 ```bash
 ./mvnw spring-boot:run     # activates the `dev` profile: development-only secrets, never deploy with it
@@ -83,3 +83,34 @@ runs the whole service against it.
   the service publicly.
 - The tenant DB password is stored encrypted in `Organization`, but nothing reads it back yet: connections use the
   shared credentials from configuration (see `TenantDatabaseNameResolver`).
+
+## Docker
+
+`Dockerfile` (multi-stage: Maven build on `eclipse-temurin:26-jdk` -> `eclipse-temurin:26-jre`, layered jar, non-root uid 10001, exec-form
+entrypoint, `HEALTHCHECK` on `/actuator/health/liveness`). Nothing secret or environment-specific is baked in: every setting
+comes from the environment at run time (see `application.properties`); orchestration lives in `sprintmodus-infrastructure`.
+
+```bash
+export GITHUB_TOKEN=<token with read:packages>
+docker build --secret id=github_token,env=GITHUB_TOKEN \
+  --build-arg GITHUB_ACTOR=<your github user> -t ghcr.io/gdb-11/sprintmodus-auth-service:dev .
+```
+
+`common-lib` and the `db-*` jars come from GitHub Packages through `.mvn/github-settings.xml` (Central is listed first, so only
+`com.sprintmodus` reaches GitHub). The token is a build **secret**, never a build argument or a layer. It needs `read:packages`, and
+a valid one is required even when the repositories are private. `LIBS_REPO_URL` can point at any Maven repository (for example a
+local static one) to build offline.
+
+CI (`.github/workflows/ci.yml`) runs the tests, then builds and pushes `ghcr.io/gdb-11/sprintmodus-auth-service` tagged `sha-<commit>` on
+`main` and `<version>` on a `v<version>` tag, never `latest`. The tests need Docker themselves, so the image build skips them.
+
+## Migrator (one-shot)
+
+`SPRING_PROFILES_ACTIVE=migrator` (`application-migrator.properties`) starts the service as a job instead of a server: it migrates
+the master database at startup (as always), then every tenant with `IsActive = TRUE` through Flyway (`TenantMigrator`), and exits
+`0`, or `1` if any tenant failed (the others are still migrated and the log names the failed ones). No Eureka, no traffic. In
+`sprintmodus-infrastructure` it is the `migrator` service that everything else waits for; run it alone with
+`docker compose run --rm migrator`. It is the same jar and the same scripts that onboard a new tenant, so both always agree.
+
+Health: only `/actuator/health/**` is reachable without a token (liveness for the container `HEALTHCHECK`); no other actuator
+endpoint is exposed.

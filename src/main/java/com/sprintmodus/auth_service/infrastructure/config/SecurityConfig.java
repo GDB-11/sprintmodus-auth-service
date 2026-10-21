@@ -28,7 +28,7 @@ class SecurityConfig {
 				.formLogin(AbstractHttpConfigurer::disable)
 				.logout(AbstractHttpConfigurer::disable)
 				.authorizeHttpRequests(requests -> requests
-						.requestMatchers("/auth/**", "/error").permitAll()
+						.requestMatchers("/auth/**", "/error", "/actuator/health/**").permitAll()
 						.anyRequest().denyAll())
 				.build();
 	}

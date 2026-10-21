@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.sql.DataSource;
 
+import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -42,6 +43,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import com.sprintmodus.auth_service.application.port.external.TenantProvisioner;
+import com.sprintmodus.auth_service.infrastructure.migration.TenantMigrator;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -98,6 +100,9 @@ class AuthServiceIntegrationTest {
 
 	@Autowired
 	TenantProvisioner provisioner;
+
+	@Autowired
+	TenantMigrator migrator;
 
 	private JdbcTemplate master() {
 		return new JdbcTemplate(masterDataSource);
@@ -471,6 +476,65 @@ class AuthServiceIntegrationTest {
 		provisioner.drop(tenantId);
 		assertThat(databaseExists(database)).isFalse();
 		provisioner.drop(tenantId);
+	}
+
+	@Test
+	void onlyTheHealthGroupOfActuatorIsReachableAndItNeedsNoToken() throws Exception {
+		mvc.perform(get("/actuator/health/liveness")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("UP"));
+		mvc.perform(get("/actuator/health")).andExpect(status().isOk()).andExpect(jsonPath("$.components").doesNotExist());
+		mvc.perform(get("/actuator/env")).andExpect(status().is4xxClientError());
+		mvc.perform(get("/actuator/beans")).andExpect(status().is4xxClientError());
+	}
+
+	// ---------------------------------------------------------------- migrate-all-tenants (the "migrator" profile)
+
+	private static String newDatabaseName() {
+		return "tenant_" + UUID.randomUUID().toString().replace("-", "");
+	}
+
+	private String insertOrganization(boolean active, String databaseName) {
+		String code = "mig-" + SEQUENCE.incrementAndGet() + Long.toString(System.nanoTime() % 100_000, 36);
+		master().update("""
+				INSERT INTO Organization (OrganizationCode, Name, Email, DatabaseHost, DatabaseName, DatabaseUsername, DatabasePassword, IsActive)
+				VALUES (?, ?, ?, 'localhost:3306', ?, 'root', 'x', ?)""", code, "Org " + code, code + "@example.com", databaseName, active);
+		return code;
+	}
+
+	private String latestVersion(String databaseName) {
+		return tenantDb(databaseName).queryForObject(
+				"SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank DESC LIMIT 1", String.class);
+	}
+
+	@Test
+	void migrateAllBringsOutdatedActiveTenantsToTheLatestSchemaAndReportsBrokenOnes() throws Exception {
+		Org current = registerOrg(); // provisioned by onboarding, so already at the latest version
+		String currentDatabase = master().queryForObject("SELECT DatabaseName FROM Organization WHERE OrganizationCode = ?", String.class,
+				current.code());
+		String outdated = newDatabaseName();
+		master().execute("CREATE DATABASE `" + outdated + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+		Flyway.configure().dataSource("jdbc:mysql://" + MYSQL.getHost() + ":" + MYSQL.getMappedPort(3306) + "/" + outdated + "?" + PARAMS,
+				"root", ROOT_PASSWORD).locations("classpath:db/migration/tenant").target("1.5").load().migrate();
+		insertOrganization(true, outdated);
+		String inactive = newDatabaseName(); // never created: touching it would fail
+		insertOrganization(false, inactive);
+		String missing = newDatabaseName();
+		String missingOrg = insertOrganization(true, missing);
+		assertThat(latestVersion(outdated)).isEqualTo("1.5");
+
+		try {
+			TenantMigrator.Report report = migrator.migrateAll();
+
+			assertThat(report.migrated()).contains(currentDatabase, outdated).doesNotContain(inactive, missing);
+			assertThat(report.failed()).as("a broken tenant is reported, and the others were still migrated").contains(missing)
+					.doesNotContain(inactive);
+			assertThat(report.succeeded()).isFalse();
+			assertThat(latestVersion(outdated)).isEqualTo(latestVersion(currentDatabase)).isNotEqualTo("1.5");
+			assertThat(migrator.migrateAll().migrated()).as("running it again changes nothing and still succeeds").contains(outdated);
+		}
+		finally {
+			master().update("UPDATE Organization SET IsActive = FALSE WHERE OrganizationCode = ?", missingOrg);
+		}
+		assertThat(migrator.migrateAll().succeeded()).isTrue();
 	}
 
 }

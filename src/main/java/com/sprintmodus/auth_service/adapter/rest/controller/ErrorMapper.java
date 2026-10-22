@@ -4,6 +4,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import com.sprintmodus.auth_service.application.error.AuthenticationError;
+import com.sprintmodus.auth_service.application.error.MemberError;
 import com.sprintmodus.auth_service.application.error.RegistrationError;
 import com.sprintmodus.auth_service.application.error.TokenError;
 import com.sprintmodus.common_lib.result.ApplicationError;
@@ -25,6 +26,7 @@ final class ErrorMapper {
 	static HttpStatus status(ApplicationError error) {
 		return switch (error) {
 			case AuthenticationError authentication -> status(authentication);
+			case MemberError member -> status(member);
 			case RegistrationError registration -> status(registration);
 			case TokenError token -> status(token);
 			default -> HttpStatus.INTERNAL_SERVER_ERROR;
@@ -44,6 +46,17 @@ final class ErrorMapper {
 				HttpStatus.BAD_REQUEST;
 			case RegistrationError.OrganizationCodeTaken _, RegistrationError.EmailAlreadyRegistered _ ->
 				HttpStatus.CONFLICT;
+		};
+	}
+
+	private static HttpStatus status(MemberError error) {
+		return switch (error) {
+			case MemberError.Unauthenticated _ -> HttpStatus.UNAUTHORIZED;
+			case MemberError.SubscriptionInactive _, MemberError.UserLimitReached _ -> HttpStatus.PAYMENT_REQUIRED;
+			case MemberError.Forbidden _, MemberError.RoleNotAllowed _, MemberError.NotOwner _ -> HttpStatus.FORBIDDEN;
+			case MemberError.InvalidUserData _, MemberError.WrongCurrentPassword _ -> HttpStatus.BAD_REQUEST;
+			case MemberError.UserNotFound _ -> HttpStatus.NOT_FOUND;
+			case MemberError.EmailTaken _, MemberError.PlanLimitExceeded _ -> HttpStatus.CONFLICT;
 		};
 	}
 

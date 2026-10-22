@@ -420,6 +420,120 @@ class AuthServiceIntegrationTest {
 		mvc.perform(get("/auth/validate-token")).andExpect(status().isUnauthorized());
 	}
 
+	// ---------------------------------------------------------------- members
+
+	private void setMaxUsers(Org org, int maxUsers) {
+		master().update("""
+				UPDATE OrganizationSubscription SET MaxUsers = ?
+				WHERE OrganizationId = (SELECT OrganizationId FROM Organization WHERE OrganizationCode = ?)""", maxUsers,
+				org.code());
+	}
+
+	private ResultActions addUser(String token, String email, String role) throws Exception {
+		return mvc.perform(post("/auth/users").header("Authorization", "Bearer " + token)
+				.contentType(MediaType.APPLICATION_JSON).content("""
+						{"email":"%s","fullName":"New User","role":"%s","password":"%s"}
+						""".formatted(email, role, PASSWORD)));
+	}
+
+	@Test
+	void anOwnerAddsUsersUpToTheLimitReadFromTheSubscriptionAndTheNewUserCanLogIn() throws Exception {
+		Org org = registerOrg();
+		String token = (String) loginOk(org).get("token"); // the token still claims the plan's own maxUsers
+		setMaxUsers(org, 3);
+
+		addUser(token, "Ana@Example.com", "ADMIN").andExpect(status().isCreated())
+				.andExpect(jsonPath("$.email").value("ana@example.com")).andExpect(jsonPath("$.role").value("ADMIN"))
+				.andExpect(jsonPath("$.passwordHash").doesNotExist());
+		addUser(token, "bea@example.com", "MEMBER").andExpect(status().isCreated());
+		addUser(token, "cris@example.com", "MEMBER").andExpect(status().isPaymentRequired())
+				.andExpect(jsonPath("$.code").value("USER_LIMIT_REACHED"));
+		addUser(token, "ana@example.com", "MEMBER").andExpect(status().isConflict())
+				.andExpect(jsonPath("$.code").value("EMAIL_TAKEN"));
+
+		login(org.code(), "bea@example.com", PASSWORD).andExpect(status().isOk());
+		mvc.perform(get("/auth/users").header("Authorization", "Bearer " + token)).andExpect(status().isOk())
+				.andExpect(jsonPath("$.count").value(3)).andExpect(jsonPath("$.maxUsers").value(3))
+				.andExpect(jsonPath("$.items[0].role").value("OWNER"))
+				.andExpect(jsonPath("$.items[?(@.email=='ana@example.com')].userCode").isNotEmpty())
+				.andExpect(jsonPath("$.items[0].passwordHash").doesNotExist());
+		assertThat(master().queryForObject("SELECT COUNT(*) FROM AuditLog WHERE Action = 'USER_ADDED' AND OrganizationId = "
+				+ "(SELECT OrganizationId FROM Organization WHERE OrganizationCode = ?)", Integer.class, org.code()))
+				.isEqualTo(2);
+	}
+
+	@Test
+	void concurrentAddsAtTheLastSeatLetExactlyOneThrough() throws Exception {
+		Org org = registerOrg();
+		String token = (String) loginOk(org).get("token");
+		setMaxUsers(org, 2);
+		CountDownLatch start = new CountDownLatch(1);
+
+		try (ExecutorService executor = Executors.newFixedThreadPool(4)) {
+			List<Future<Integer>> results = new ArrayList<>();
+			for (int i = 0; i < 4; i++) {
+				String email = "racer" + i + "@example.com";
+				results.add(executor.submit(() -> {
+					start.await();
+					return addUser(token, email, "MEMBER").andReturn().getResponse().getStatus();
+				}));
+			}
+			start.countDown();
+			List<Integer> statuses = new ArrayList<>();
+			for (Future<Integer> result : results) {
+				statuses.add(result.get());
+			}
+			assertThat(statuses).containsExactlyInAnyOrder(201, 402, 402, 402);
+		}
+
+		String tenant = databaseNameOf(tenantIdOf(org.code()));
+		assertThat(tenantDb(tenant).queryForObject("SELECT COUNT(*) FROM `User` WHERE IsActive = TRUE", Integer.class))
+				.isEqualTo(2);
+	}
+
+	@Test
+	void aDeactivatedUserFreesASeatButKeepsItsEmail() throws Exception {
+		Org org = registerOrg();
+		String token = (String) loginOk(org).get("token");
+		setMaxUsers(org, 2);
+		addUser(token, "gone@example.com", "MEMBER").andExpect(status().isCreated());
+		tenantDb(databaseNameOf(tenantIdOf(org.code()))).update("UPDATE `User` SET IsActive = FALSE WHERE Email = ?",
+				"gone@example.com");
+
+		addUser(token, "gone@example.com", "MEMBER").andExpect(status().isConflict());
+		addUser(token, "fresh@example.com", "MEMBER").andExpect(status().isCreated());
+	}
+
+	@Test
+	void adminsAndMembersAreLimitedAndTenantsStayIsolated() throws Exception {
+		Org first = registerOrg();
+		Org second = registerOrg();
+		String firstOwner = (String) loginOk(first).get("token");
+		String secondOwner = (String) loginOk(second).get("token");
+		addUser(firstOwner, "admin@example.com", "ADMIN").andExpect(status().isCreated());
+		addUser(firstOwner, "member@example.com", "MEMBER").andExpect(status().isCreated());
+		String admin = (String) json.readValue(login(first.code(), "admin@example.com", PASSWORD).andReturn().getResponse()
+				.getContentAsString(), Map.class).get("token");
+		String member = (String) json.readValue(login(first.code(), "member@example.com", PASSWORD).andReturn()
+				.getResponse().getContentAsString(), Map.class).get("token");
+
+		addUser(admin, "x1@example.com", "MEMBER").andExpect(status().isCreated());
+		addUser(admin, "x2@example.com", "ADMIN").andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.code").value("ROLE_NOT_ALLOWED"));
+		addUser(firstOwner, "x3@example.com", "OWNER").andExpect(status().isForbidden());
+		addUser(member, "x4@example.com", "MEMBER").andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.code").value("FORBIDDEN"));
+		mvc.perform(get("/auth/users").header("Authorization", "Bearer " + member)).andExpect(status().isForbidden());
+		mvc.perform(get("/auth/users")).andExpect(status().isUnauthorized());
+		addUser("garbage", "x5@example.com", "MEMBER").andExpect(status().isUnauthorized());
+
+		// the same email is free in another tenant, and the second tenant sees only its own people
+		addUser(secondOwner, "member@example.com", "MEMBER").andExpect(status().isCreated());
+		mvc.perform(get("/auth/users").header("Authorization", "Bearer " + secondOwner)).andExpect(status().isOk())
+				.andExpect(jsonPath("$.total").value(2))
+				.andExpect(jsonPath("$.items[?(@.email=='admin@example.com')]").isEmpty());
+	}
+
 	@Test
 	void refreshIssuesAFreshSessionAndPicksUpPlanChanges() throws Exception {
 		Org org = registerOrg();

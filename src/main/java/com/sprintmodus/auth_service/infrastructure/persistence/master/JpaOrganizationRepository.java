@@ -12,6 +12,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.sprintmodus.auth_service.application.port.persistence.OrganizationRepository;
 import com.sprintmodus.auth_service.domain.model.Organization;
+import com.sprintmodus.auth_service.domain.model.OrganizationRole;
+import com.sprintmodus.auth_service.domain.model.Plan;
 import com.sprintmodus.common_lib.result.Result;
 
 import tools.jackson.databind.json.JsonMapper;
@@ -46,6 +48,35 @@ class JpaOrganizationRepository implements OrganizationRepository {
 	@Override
 	public Optional<Organization> findByCode(String code) {
 		return organizations.findByCode(code).map(JpaOrganizationRepository::toDomain);
+	}
+
+	@Override
+	public Optional<Organization> findByTenantId(UUID tenantId) {
+		return organizations.findByTenantId(tenantId.toString()).map(JpaOrganizationRepository::toDomain);
+	}
+
+	@Override
+	public void recordUserAdded(long organizationId, UUID addedBy, UUID userCode, OrganizationRole role) {
+		transaction.executeWithoutResult(_ -> auditLog.insert(organizationId, "USER_ADDED", "User", 0, addedBy.toString(),
+				json.writeValueAsString(Map.of("userCode", userCode.toString(), "role", role.name()))));
+	}
+
+	@Override
+	public void recordPlanChanged(long organizationId, UUID changedBy, Plan from, Plan to) {
+		transaction.executeWithoutResult(_ -> auditLog.insert(organizationId, "SUBSCRIPTION_CHANGED", "Subscription", 0,
+				changedBy.toString(), json.writeValueAsString(Map.of("from", from.name(), "to", to.name()))));
+	}
+
+	@Override
+	public void recordUserActiveChanged(long organizationId, UUID changedBy, UUID userCode, boolean active) {
+		transaction.executeWithoutResult(_ -> auditLog.insert(organizationId, active ? "USER_ACTIVATED" : "USER_DEACTIVATED", "User", 0,
+				changedBy.toString(), json.writeValueAsString(Map.of("userCode", userCode.toString()))));
+	}
+
+	@Override
+	public void recordPasswordChanged(long organizationId, UUID changedBy, UUID userCode) {
+		transaction.executeWithoutResult(_ -> auditLog.insert(organizationId, "PASSWORD_CHANGED", "User", 0, changedBy.toString(),
+				json.writeValueAsString(Map.of("userCode", userCode.toString()))));
 	}
 
 	@Override

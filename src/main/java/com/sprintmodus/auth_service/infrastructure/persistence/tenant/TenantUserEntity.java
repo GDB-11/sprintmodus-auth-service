@@ -1,5 +1,6 @@
 package com.sprintmodus.auth_service.infrastructure.persistence.tenant;
 
+import java.time.Instant;
 import java.util.UUID;
 
 import com.sprintmodus.auth_service.domain.model.OrganizationRole;
@@ -38,5 +39,8 @@ class TenantUserEntity {
 
 	@Column(name = "IsActive")
 	boolean active;
+
+	@Column(name = "LastLoginAt")
+	Instant lastLoginAt;
 
 }

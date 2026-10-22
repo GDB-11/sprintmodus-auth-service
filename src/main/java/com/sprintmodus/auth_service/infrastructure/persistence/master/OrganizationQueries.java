@@ -22,6 +22,13 @@ interface OrganizationQueries extends Repository<OrganizationEntity, Long> {
 			""")
 	Optional<OrganizationEntity> findByCode(@Param("code") String code);
 
+	@Query(nativeQuery = true, value = """
+			SELECT OrganizationId, TenantId, OrganizationCode, Name, Email, IsActive
+			FROM Organization
+			WHERE TenantId = UUID_TO_BIN(:tenantId)
+			""")
+	Optional<OrganizationEntity> findByTenantId(@Param("tenantId") String tenantId);
+
 	@Query(nativeQuery = true, value = "SELECT COUNT(*) FROM Organization WHERE OrganizationCode = :code")
 	long countByCode(@Param("code") String code);
 

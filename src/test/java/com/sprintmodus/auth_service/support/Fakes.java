@@ -51,6 +51,39 @@ public final class Fakes {
 			return stored.stream().filter(organization -> organization.code().equalsIgnoreCase(code)).findFirst();
 		}
 
+		public final List<String> userAdditions = new ArrayList<>();
+
+		public final List<String> activeChanges = new ArrayList<>();
+
+		@Override
+		public void recordUserActiveChanged(long organizationId, UUID changedBy, UUID userCode, boolean active) {
+			activeChanges.add(userCode + ":" + active);
+		}
+
+		@Override
+		public Optional<Organization> findByTenantId(UUID tenantId) {
+			return stored.stream().filter(organization -> organization.tenantId().equals(tenantId)).findFirst();
+		}
+
+		@Override
+		public void recordUserAdded(long organizationId, UUID addedBy, UUID userCode, OrganizationRole role) {
+			userAdditions.add(organizationId + ":" + addedBy + ":" + userCode + ":" + role);
+		}
+
+		public final List<String> passwordChanges = new ArrayList<>();
+
+		public final List<String> planChanges = new ArrayList<>();
+
+		@Override
+		public void recordPlanChanged(long organizationId, UUID changedBy, Plan from, Plan to) {
+			planChanges.add(organizationId + ":" + from + ">" + to);
+		}
+
+		@Override
+		public void recordPasswordChanged(long organizationId, UUID changedBy, UUID userCode) {
+			passwordChanges.add(organizationId + ":" + changedBy + ":" + userCode);
+		}
+
 		@Override
 		public boolean existsByCode(String code) {
 			return findByCode(code).isPresent();
@@ -89,6 +122,12 @@ public final class Fakes {
 			return Optional.ofNullable(byOrganization.get(organizationId));
 		}
 
+		@Override
+		public OrganizationSubscription changePlan(long organizationId, Plan plan) {
+			add(organizationId, plan, null, true);
+			return byOrganization.get(organizationId);
+		}
+
 	}
 
 	public static class TenantUsers implements TenantUserRepository {
@@ -125,8 +164,54 @@ public final class Fakes {
 		}
 
 		@Override
+		public void updatePassword(UUID tenantId, UUID userCode, String passwordHash) {
+			var list = byTenant.getOrDefault(tenantId, new ArrayList<>());
+			list.replaceAll(user -> user.userCode().equals(userCode) ? new TenantUser(user.userCode(), user.email(),
+					user.fullName(), passwordHash, user.role(), user.active()) : user);
+		}
+
+		@Override
 		public void recordLogin(UUID tenantId, UUID userCode, Instant at) {
 			logins.put(userCode, at);
+		}
+
+		@Override
+		public Result<com.sprintmodus.common_lib.result.Unit, Rejection> createWithinLimit(UUID tenantId, NewUser user,
+				int maxUsers) {
+			List<TenantUser> existing = byTenant.computeIfAbsent(tenantId, _ -> new ArrayList<>());
+			if (existing.stream().anyMatch(found -> found.email().equalsIgnoreCase(user.email()))) {
+				return Result.failure(Rejection.EMAIL_TAKEN);
+			}
+			if (existing.stream().filter(TenantUser::active).count() >= maxUsers) {
+				return Result.failure(Rejection.LIMIT_REACHED);
+			}
+			existing.add(new TenantUser(user.userCode(), user.email(), user.fullName(), user.passwordHash(), user.role(),
+					true));
+			created.add(user);
+			return Result.success(com.sprintmodus.common_lib.result.Unit.VALUE);
+		}
+
+		@Override
+		public Result<com.sprintmodus.common_lib.result.Unit, Rejection> setActiveWithinLimit(UUID tenantId, UUID userCode,
+				boolean active, int maxUsers) {
+			var list = byTenant.getOrDefault(tenantId, new ArrayList<>());
+			boolean wasActive = list.stream().anyMatch(user -> user.userCode().equals(userCode) && user.active());
+			if (active && !wasActive && list.stream().filter(TenantUser::active).count() >= maxUsers) {
+				return Result.failure(Rejection.LIMIT_REACHED);
+			}
+			list.replaceAll(user -> user.userCode().equals(userCode) ? new TenantUser(user.userCode(), user.email(),
+					user.fullName(), user.passwordHash(), user.role(), active) : user);
+			return Result.success(com.sprintmodus.common_lib.result.Unit.VALUE);
+		}
+
+		@Override
+		public Members list(UUID tenantId, int page, int size) {
+			List<TenantUser> all = byTenant.getOrDefault(tenantId, List.of());
+			List<com.sprintmodus.auth_service.application.dto.Member> items = all.stream().skip((long) page * size)
+					.limit(size).map(user -> new com.sprintmodus.auth_service.application.dto.Member(user.userCode(),
+							user.fullName(), user.email(), user.role(), user.active(), null))
+					.toList();
+			return new Members(items, all.size(), all.stream().filter(TenantUser::active).count());
 		}
 
 		@Override

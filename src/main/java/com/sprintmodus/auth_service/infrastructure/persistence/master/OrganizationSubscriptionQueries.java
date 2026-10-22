@@ -26,6 +26,17 @@ interface OrganizationSubscriptionQueries extends Repository<OrganizationSubscri
 			@Param("maxProjects") int maxProjects, @Param("maxUsers") int maxUsers,
 			@Param("maxStorageMB") int maxStorageMB);
 
+	@Modifying(clearAutomatically = true)
+	@Query(nativeQuery = true, value = """
+			UPDATE OrganizationSubscription
+			SET PlanType = :plan, MaxProjects = :maxProjects, MaxUsers = :maxUsers, MaxStorageMB = :maxStorageMB,
+			    ExpiresAt = NULL
+			WHERE OrganizationId = :organizationId
+			""")
+	int changePlan(@Param("organizationId") long organizationId, @Param("plan") String plan,
+			@Param("maxProjects") int maxProjects, @Param("maxUsers") int maxUsers,
+			@Param("maxStorageMB") int maxStorageMB);
+
 	@Query(nativeQuery = true, value = "SELECT SubscriptionId FROM OrganizationSubscription WHERE OrganizationId = :organizationId")
 	long findIdByOrganizationId(@Param("organizationId") long organizationId);
 
